@@ -1,53 +1,115 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# Esteira Industrial — ESP32 + FreeRTOS + Instrumentação RT
 
-# Hello World Example
+Projeto acadêmico desenvolvido para a disciplina **Sistemas em Tempo Real**, implementando uma **esteira industrial simulada** controlada por um **ESP32** com **FreeRTOS**.  
+O sistema executa múltiplas tarefas concorrentes (hard e soft real-time), realiza instrumentação automática e coleta estatísticas de desempenho temporal (WCRT, HWM99, (m,k)-firm, bloqueio, preempção e timestamps).
 
-Starts a FreeRTOS task to print "Hello World".
+---
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+## 🧩 Visão Geral
 
-## How to use example
+A esteira possui quatro tarefas principais de controle e instrumentação:
 
-Follow detailed instructions provided specifically for this example.
+| Tarefa | Tipo | Período / Evento | Função |
+|--------|------|------------------|--------|
+| **ENC_SENSE** | Hard RT | 5 ms | Leitura do sensor de encoder (velocidade e posição) |
+| **SPD_CTRL** | Hard RT | 5 ms | Controle PI simulado + interface com HMI |
+| **SORT_ACT** | Evento (Touch OBJ) | — | Simula o atuador de separação de peças |
+| **SAFE_STOP** | Evento (Touch E-STOP) | — | Emergência: para a esteira instantaneamente |
 
-Select the instructions depending on Espressif chip installed on your development board:
+Há também a HMI (Touch HMI) como evento **soft real-time** e um servidor UDP/TCP opcional para teste de rede e RTT.
 
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
+---
+
+## ⚙️ Funcionalidades Principais
+
+- 🧠 **Instrumentação completa por tarefa**  
+  - WCRT (Worst-Case Response Time)  
+  - Cmax, Lmax, Rmax (execução, latência, resposta)  
+  - (m,k)-firm deadlines  
+  - Percentil 99 (HWM99)  
+  - Bloqueio e preempção máxima  
+  - Timestamps (`release`, `start`, `end`)  
+
+- 🧭 **Sincronização temporal** via SNTP com timestamp UTC µs.  
+- 🔌 **Comunicação UDP/TCP** com cálculo de RTT e OWD.  
+- 🖐️ **Touch pad polling** (GPIOs configurados para OBJ, HMI e E-STOP).  
+- 💡 **LED de status** com piscar recursivo (`blink_led_recursive()`).  
+- 📊 **Coleta de métricas e logs via UART** em formato tabular, 1 Hz.
+
+---
+
+## 🧱 Arquitetura do Sistema
+          +------------------+
+          | ENC_SENSE (5 ms) |──┐
+          +------------------+  │
+                                ▼
+          +------------------+
+          | SPD_CTRL (5 ms)  |───► PI Simulado + HMI
+          +------------------+
+                                │
+      Touch OBJ ───► SORT_ACT ──┘
+      Touch STOP ──► SAFE_STOP
+      Touch HMI ──► Soft RT UI handler
+
+   
+O sistema é executado sobre **FreeRTOS** com uso de **semáforos e notificações diretas**, garantindo determinismo e mínima latência de comunicação entre tarefas.
+
+---
+
+## 📈 Exemplo de Saída (UART)
+          I (8698) ESTEIRA: STATS: rpm=353.2 set=398.3 pos=174.8mm
+          I (8698) ESTEIRA: ENC: rel=102 fin=102 hard=0 WCRT=786us HWM99≈748us Lmax=13us Cmax=773us (m,k)=(10,10)
+          I (8718) ESTEIRA: CTRL: rel=102 fin=102 hard=0 WCRT=2027us HWM99≈748us Lmax=805us Cmax=1231us (m,k)=(10,10)
+          I (8728) ESTEIRA: SORT: rel=1 fin=1 hard=0 WCRT=741us HWM99≈1082us Lmax=28us Cmax=713us (m,k)=(0,10)
+          I (8738) ESTEIRA: SAFE: rel=1 fin=1 hard=0 WCRT=945us HWM99≈1082us Lmax=32us Cmax=913us (m,k)=(0,10)
 
 
-## Example folder contents
+---
 
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
+## 🧪 Hardware Utilizado
 
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
+| Componente | Descrição |
+|-------------|------------|
+| **ESP32 DevKit V1** | MCU dual-core 240 MHz, Wi-Fi integrado |
+| **Touch sensors (GPIO27, 33, 32, 13)** | Entradas capacitivas (OBJ, HMI, E-STOP, SERVER) |
+| **LED GPIO2** | Indicação visual e debug |
+| **UART0** | Log serial e interface de monitoramento |
+| **Rede Wi-Fi** | Envio de pacotes UDP/TCP para medição de RTT |
 
-Below is short explanation of remaining files in the project folder.
+---
 
+## 🧰 Build e Execução
+
+### Pré-requisitos
+- ESP-IDF v5.5.1 ou superior
+- Python 3.8+
+- Git e `idf.py` no PATH
+
+### Compilação
+```bash
+idf.py set-target esp32
+idf.py build
+idf.py -p COMx flash monitor (substitua COMx pela porta do seu ESP32)
 ```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
-```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
 
-## Troubleshooting
+## 🧩 Estrutura do Código
 
-* Program upload failure
+          📁 main/
+          ├── hello_world_main.c → app_main() e tarefas FreeRTOS
+          ├── stats.c / stats.h → Instrumentação RT (WCRT, HWM99, (m,k))
+          ├── touch.c / touch.h → Touch pad polling e calibração
+          ├── net_udp.c / net_tcp.c → Servidores UDP e TCP
+          └── utils.c / utils.h → SNTP, LED, logs, formatação
+ 
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+---
 
-## Technical support and feedback
+## 📊 Métricas Típicas (240 MHz)
 
-Please use the following feedback channels:
-
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
-
-We will get back to you as soon as possible.
+| Tarefa    | WCRT   | Cmax   | HWM99  | (m,k)   | Tipo  |
+| ---------- | ------ | ------ | ------ | ------- | ----- |
+| ENC_SENSE | 1.9 ms | 1.9 ms | 1.0 ms | (10,10) | Hard  |
+| SPD_CTRL  | 3.2 ms | 2.0 ms | 1.0 ms | (10,10) | Hard  |
+| SORT_ACT  | 0.7 ms | 0.7 ms | 1.0 ms | (0,10)  | Event |
+| SAFE_STOP | 0.9 ms | 0.9 ms | 1.0 ms | (0,10)  | Event |
