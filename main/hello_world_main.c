@@ -53,15 +53,18 @@
 #include "lwip/netdb.h"
 
 // ==== config WIFI ====
-#define PC_IP   "172.20.10.12"
+//#define PC_IP   "172.20.10.12" //BERNA
+#define PC_IP   "192.168.100.173"   //LAURENTINO
 #define UDP_PORT 6010
 #define TCP_PORT 5000
 
 #define TAG "ESTEIRA"
 
 // CONFIG DO WIFI
-#define WIFI_SSID "berna12"
-#define WIFI_PASS "12345678"
+//#define WIFI_SSID "berna12"
+//#define WIFI_PASS "12345678"
+#define WIFI_SSID "Tourinho_2.4GHz"
+#define WIFI_PASS "@Leonardo18"
 
 // ====== Mapeamento correto dos touch pads (ESP32 WROOM) ======
 // T7 = GPIO27, T8 = GPIO33, T9 = GPIO32
@@ -81,6 +84,7 @@
 #define PRIO_STATS      1
 #define PRIO_UDP        5
 #define PRIO_TCP        5
+#define PRIO_TIME       4
 #define STK_MAIN        4096
 #define STK_AUX         4096
 
@@ -99,6 +103,8 @@ typedef struct { int64_t t_evt_us; } sort_evt_t;
 static QueueHandle_t qSort = NULL;
 static SemaphoreHandle_t semEStop = NULL;  // disparado pelo Touch D
 static SemaphoreHandle_t semHMI   = NULL;  // disparado pelo Touch C
+
+volatile char ts[32]; 
 
 // ====== Estado simulado da esteira ======
 typedef struct {
@@ -179,6 +185,7 @@ static void task_sort_act(void *arg);
 static void task_safety(void *arg);
 static void task_touch_poll(void *arg);
 static void task_stats(void *arg);
+static void task_time_ctd(void *arg);
 static void task_uart_cmd(void *arg);
 static void toggle_server_tasks(void);
 
@@ -210,6 +217,14 @@ static void print_runtime_stats(void) {
     ESP_LOGI(TAG, "\nTask               Time(us)   %%CPU\n%s", buf);
 }
 #endif
+
+/**TIME TASK*/
+static void task_time_ctd(void *arg){
+    for (;;) {
+        now_str(ts, sizeof(ts));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
 
 /* ====== ENC_SENSE (periódica 5 ms): estima velocidade/posição ====== */
 static void task_enc_sense(void *arg){
@@ -364,7 +379,6 @@ static void task_touch_poll(void *arg) {
             g_last_touchB_us = esp_timer_get_time();         // release do evento
             sort_evt_t e = { .t_evt_us = g_last_touchB_us }; // passa release para a task
             (void)xQueueSend(qSort, &e, 0);
-            char ts[32]; now_str(ts, sizeof(ts));
             ESP_LOGW(TAG, "[%s] OBJ: raw=%u (thr=%u)", ts, raw, th_obj);
             blink_led_recursive(5, ticks_from_ms(250));
         }
@@ -374,9 +388,7 @@ static void task_touch_poll(void *arg) {
         touch_pad_read_raw_data(TP_HMI, &raw);
         bool hmi = (raw < th_hmi);
         if (hmi && !prev_hmi) { 
-            (void)xSemaphoreGive(semHMI); 
-            char ts[32]; 
-            now_str(ts, sizeof(ts)); 
+            (void)xSemaphoreGive(semHMI);  
             ESP_LOGW(TAG, "[%s] HMI: raw=%u (thr=%u)", ts, raw, th_hmi);
             blink_led_recursive(5, ticks_from_ms(150));
         }
@@ -397,7 +409,6 @@ static void task_touch_poll(void *arg) {
         touch_pad_read_raw_data(TP_SERVER, &raw);
         bool server = (raw < th_server);
         if (server && !prev_server) {
-            char ts[32]; now_str(ts, sizeof(ts));
             ESP_LOGW(TAG, "[%s] SERVER touch pressed: raw=%u (thr=%u)", ts, raw, th_server);
             // toggle server tasks (graceful stop/start)
             toggle_server_tasks();
@@ -414,7 +425,6 @@ static void task_uart_cmd(void *arg)
 {
     const uart_port_t U = UART_NUM_0;
     uart_driver_install(U, 256, 0, 0, NULL, 0);
-    char ts[32]; now_str(ts, sizeof(ts));
     ESP_LOGI(TAG, "[%s] UART: b=OBJ  c=HMI  d=E-STOP  r=RAWs", ts);
 
     uint8_t ch;
@@ -425,10 +435,9 @@ static void task_uart_cmd(void *arg)
                     g_last_touchB_us = esp_timer_get_time();
                     sort_evt_t e = { g_last_touchB_us };
                     xQueueSend(qSort,&e,0);
-                    char ts[32]; now_str(ts, sizeof(ts));
                     ESP_LOGI(TAG,"[%s] [UART] OBJ", ts);
                 } break;
-                case 'c': case 'C': { xSemaphoreGive(semHMI); char ts[32]; now_str(ts, sizeof(ts)); ESP_LOGI(TAG,"[%s] [UART] HMI", ts); } break;
+                case 'c': case 'C': { xSemaphoreGive(semHMI); ESP_LOGI(TAG,"[%s] [UART] HMI", ts); } break;
                 case 'd': case 'D': {
                     g_last_touchD_us = esp_timer_get_time();
                     xSemaphoreGive(semEStop);
@@ -439,7 +448,6 @@ static void task_uart_cmd(void *arg)
                     touch_pad_read_raw_data(TP_OBJ,&ro);
                     touch_pad_read_raw_data(TP_HMI,&rc);
                     touch_pad_read_raw_data(TP_ESTOP,&rd);
-                    char ts[32]; now_str(ts, sizeof(ts));
                     ESP_LOGI(TAG, "[%s] RAWs -> OBJ=%u  HMI=%u  ESTOP=%u", ts, ro, rc, rd);
                 } break;
                 default: break;
@@ -460,21 +468,20 @@ static void task_stats(void *arg)
 
     for (;;) {
         vTaskDelayUntil(&last, period);
-
-        char ts[32]; 
-        now_str(ts, sizeof(ts));
+ 
+        
 
         ESP_LOGI(TAG, "[%s] =====================================================================", ts);
 
-        now_str(ts, sizeof(ts));
+        
 
         ESP_LOGI(TAG, "[%s] UART: b=OBJ  c=HMI  d=E-STOP  r=RAWs", ts);
 
-        now_str(ts, sizeof(ts));
+        
 
         ESP_LOGI(TAG, "[%s] STATS: rpm=%.1f set=%.1f pos=%.1fmm", ts, g_belt.rpm, g_belt.set_rpm, g_belt.pos_mm);
 
-        now_str(ts, sizeof(ts));
+        
 
         ESP_LOGI(TAG,
             "[%s] ENC: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
@@ -483,7 +490,7 @@ static void task_stats(void *arg)
             (long long)st_enc.worst_latency_us,
             (long long)st_enc.worst_response_us);
         
-        now_str(ts, sizeof(ts));
+        
         
         ESP_LOGI(TAG,
             "[%s] CTRL: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
@@ -492,7 +499,7 @@ static void task_stats(void *arg)
             (long long)st_ctrl.worst_latency_us,
             (long long)st_ctrl.worst_response_us);
         
-        now_str(ts, sizeof(ts));
+        
         
         ESP_LOGI(TAG,
             "[%s] SORT: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
@@ -501,7 +508,7 @@ static void task_stats(void *arg)
             (long long)st_sort.worst_latency_us,
             (long long)st_sort.worst_response_us);
 
-        now_str(ts, sizeof(ts));
+        
         
         ESP_LOGI(TAG,
             "[%s] SAFE: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
@@ -596,7 +603,7 @@ static void tcp_server_task(void *arg) {
     // set non-blocking to allow periodic check of tcp_should_run
     int flags = fcntl(listen_fd, F_GETFL, 0);
     fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
-    char ts[32]; now_str(ts, sizeof(ts));
+    
     ESP_LOGE(TAG, "[%s] Servidor TCP na porta %d", ts, TCP_PORT);
     blink_led_recursive(3, ticks_from_ms(150));
 
@@ -613,9 +620,8 @@ static void tcp_server_task(void *arg) {
             // no connection; sleep a bit and re-check run flag
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
-        }
-        char ts[32]; 
-        now_str(ts, sizeof(ts));
+        } 
+        
         ESP_LOGW(TAG, "[%s] Cliente conectado", ts);
 
         // Envia mensagem de boas-vindas
@@ -627,7 +633,7 @@ static void tcp_server_task(void *arg) {
             int len = recv(sock, rx, sizeof(rx)-1, 0);
             if (len <= 0) {
                 int er = errno;
-                char ts[32]; now_str(ts, sizeof(ts));
+                
                 if (len == 0) {
                     ESP_LOGW(TAG, "[%s] Cliente fechou a conexão (len=0)", ts);
                 } else {
@@ -635,9 +641,8 @@ static void tcp_server_task(void *arg) {
                 }
                 break;
             }
-            rx[len] = 0;
-            char ts[32]; 
-            now_str(ts, sizeof(ts));
+            rx[len] = 0; 
+            
             ESP_LOGW(TAG, "[%s] RX: %s", ts, rx);
 
             // Eco + resposta JSON simples
@@ -679,7 +684,7 @@ static void start_udp(void) {
     udp_should_run = true;
     xTaskCreatePinnedToCore(udp_task, "udp_task", STK_MAIN, NULL, PRIO_UDP, &hUDP, 0);
     blink_led_recursive(2, ticks_from_ms(150));
-    char ts[32]; now_str(ts, sizeof(ts));
+    
     ESP_LOGE(TAG, "[%s] Servidor UDP na porta %d", ts, UDP_PORT);
 }
 
@@ -759,6 +764,7 @@ void app_main(void) {
     xTaskCreatePinnedToCore(task_enc_sense, "ENC_SENSE", STK_MAIN, NULL, PRIO_ENC,   &hENC,  0);
     xTaskCreatePinnedToCore(task_spd_ctrl,  "SPD_CTRL",  STK_MAIN, NULL, PRIO_CTRL,  &hCTRL, 0);
     xTaskCreatePinnedToCore(task_sort_act,  "SORT_ACT",  STK_MAIN, NULL, PRIO_SORT,  &hSORT, 0);
+    xTaskCreatePinnedToCore(task_time_ctd,  "TIME_CTD",  STK_MAIN, NULL, PRIO_TIME,  &hSORT, 0);
 
     // Encadeamento ENC -> CTRL
     hCtrlNotify = hCTRL;
