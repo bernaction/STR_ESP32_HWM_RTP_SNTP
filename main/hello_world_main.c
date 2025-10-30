@@ -149,8 +149,10 @@ static inline void stats_on_finish(rt_stats_t *s, int64_t t_end, int64_t D_us, b
 }
 
 static inline void now_str(char *buf, size_t len) {
-    struct timeval tv; gettimeofday(&tv, NULL);          // CLOCK_REALTIME (SNTP)
-    struct tm tm; localtime_r(&tv.tv_sec, &tm);          // fuso local já setado
+    struct timeval tv; 
+    gettimeofday(&tv, NULL);          // CLOCK_REALTIME (SNTP)
+    struct tm tm; 
+    localtime_r(&tv.tv_sec, &tm);          // fuso local já setado
     int ms = (int)(tv.tv_usec / 1000);
     snprintf(buf, len, "%02d/%02d/%04d %02d:%02d:%02d.%03d",
              tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900,
