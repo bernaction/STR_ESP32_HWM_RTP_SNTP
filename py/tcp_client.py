@@ -3,7 +3,8 @@ import socket, time, msvcrt
 from datetime import datetime
 
 
-ESP_IP = "172.20.10.10"   # coloque o IP da sua ESP32
+#ESP_IP = "172.20.10.10"   # coloque o IP da sua ESP32
+ESP_IP = "192.168.100.185"
 PORT   = 5000
 
 def now_ms(): return int(time.time()*1000)
