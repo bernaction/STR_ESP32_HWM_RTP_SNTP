@@ -770,6 +770,7 @@ void app_main(void) {
     //xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", STK_MAIN, NULL, PRIO_TCP, NULL, 0);
     //xTaskCreatePinnedToCore(udp_task,        "udp_task",   STK_MAIN, NULL, PRIO_UDP, NULL, 0);
     start_udp();
+    
 
     ESP_LOGI(TAG, "Sistema iniciado");
 }
