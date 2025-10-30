@@ -220,7 +220,7 @@ static void print_runtime_stats(void) {
 static void task_time_ctd(void *arg){
     for (;;) {
         now_str(ts, sizeof(ts));
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
