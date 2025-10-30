@@ -36,6 +36,7 @@
 #include <errno.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 // ====== Led ======
 #define CONFIG_LED_PIN 2
@@ -121,12 +122,27 @@ typedef struct {
     volatile uint32_t hard_miss, soft_miss;
     volatile int64_t  last_release_us, last_start_us, last_end_us;
     volatile int64_t  worst_exec_us, worst_latency_us, worst_response_us;
+
+    // ---- HWM(99%) / P99 ----
+    #define RBUF 256
+    volatile uint16_t r_count;
+    volatile int32_t  r_buf[RBUF];
+
+    // ---- (m,k)-firm (k <= 16) ----
+    volatile uint8_t  k_window;     // ex.: 10
+    volatile uint8_t  win_filled;   // quantos válidos na janela
+    volatile uint16_t win_mask;     // últimos k bits (1=sucesso, 0=deadline miss)
+
+    // ---- Interferência & Bloqueio ----
+    volatile uint32_t preemptions;      // (opcional: preenchido via hook)
+    volatile int64_t  blocked_us_total; // soma de tempos bloqueado
 } rt_stats_t;
 
-static rt_stats_t st_enc  = {0};
-static rt_stats_t st_ctrl = {0};
-static rt_stats_t st_sort = {0};
-static rt_stats_t st_safe = {0};
+static rt_stats_t st_enc  = { .k_window = 10 };
+static rt_stats_t st_ctrl = { .k_window = 10 };  // pode tratar como hard+soft (ver abaixo)
+static rt_stats_t st_sort = { .k_window = 10 };
+static rt_stats_t st_safe = { .k_window = 10 };
+
 
 static volatile int64_t g_last_touchB_us = 0;     // release do Touch B
 static volatile int64_t g_last_touchD_us = 0;     // release do Touch D
@@ -145,14 +161,76 @@ static inline void stats_on_start(rt_stats_t *s, int64_t t_start) {
 static inline void stats_on_finish(rt_stats_t *s, int64_t t_end, int64_t D_us, bool hard) {
     s->finishes++;
     s->last_end_us = t_end;
+
     int64_t exec = t_end - s->last_start_us;
     if (exec > s->worst_exec_us) s->worst_exec_us = exec;
+
     int64_t resp = t_end - s->last_release_us;
     if (resp > s->worst_response_us) s->worst_response_us = resp;
+
+    int64_t lat  = s->last_start_us - s->last_release_us;
+    if (lat > s->worst_latency_us) s->worst_latency_us = lat;
+
+    // deadline miss (hard/soft conforme flag)
     if (resp > D_us) {
         if (hard) s->hard_miss++; else s->soft_miss++;
     }
+
+    // guarda R para HWM(99%)
+    if (s->r_count < RBUF) s->r_buf[s->r_count++] = (int32_t)resp;
+
+    // (m,k)-firm (k <= 16). 1 = cumpriu deadline; 0 = perdeu
+    uint8_t k = s->k_window ? s->k_window : 10;
+    uint8_t hit = (resp <= D_us) ? 1 : 0;
+    s->win_mask = ((s->win_mask << 1) | hit) & ((1u << k) - 1);
+    if (s->win_filled < k) s->win_filled++;
 }
+
+
+static int32_t p99_of_buf(volatile int32_t *v, volatile uint16_t n){
+    if (n == 0) return 0;
+    // cópia local pra ordenar (n <= 256)
+    int32_t tmp[RBUF];
+    uint16_t m = n; if (m > RBUF) m = RBUF;
+    for (uint16_t i=0;i<m;i++) tmp[i] = v[i];
+    // insertion sort simples
+    for (int i=1;i<m;i++){ int32_t key=tmp[i], j=i-1; while(j>=0 && tmp[j]>key){ tmp[j+1]=tmp[j]; j--; } tmp[j+1]=key; }
+    int idx = (int)(0.99*(m-1)); if (idx<0) idx=0; if (idx>=m) idx=m-1;
+    return tmp[idx];
+}
+
+static uint32_t mk_hits(const rt_stats_t *s){
+    uint8_t k = s->k_window ? s->k_window : 10;
+    uint16_t mask = s->win_mask & ((1u<<k)-1);
+    uint32_t hits = 0; for(uint8_t i=0;i<k;i++) hits += (mask>>i) & 1u;
+    return (s->win_filled < k) ? 0 : hits; // só reporta quando janela cheia
+}
+
+
+// [P3] epoch em micros (usa SNTP/CLOCK_REALTIME)
+static inline int64_t now_us_epoch(void){
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec*1000000LL + tv.tv_usec;
+}
+
+// [P3] extrai int64 de um "json" simples: procura por "key":<numero>
+static bool parse_i64_from_json(const char *s, const char *key, long long *out){
+    char pat[64]; snprintf(pat, sizeof(pat), "\"%s\":", key);
+    const char *p = strstr(s, pat);
+    if(!p) return false;
+    p += strlen(pat);
+    // pula espaços
+    while(*p==' '||*p=='\t') p++;
+    // aceita +/-
+    bool neg = (*p=='-'); if(*p=='+'||*p=='-') p++;
+    long long v = 0; bool ok=false;
+    while(*p>='0' && *p<='9'){ v = v*10 + (*p-'0'); p++; ok=true; }
+    if(!ok) return false;
+    *out = neg ? -v : v;
+    return true;
+}
+
+
 
 static inline void now_str(char *buf, size_t len) {
     struct timeval tv; 
@@ -262,6 +340,10 @@ static void task_enc_sense(void *arg){
 /* ====== SPD_CTRL (encadeada): controle PI simulado + HMI (soft) ====== */
 static void task_spd_ctrl(void *arg){
     float kp = 0.4f, ki = 0.1f, integ = 0.f;
+    int64_t tb = esp_timer_get_time();
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    int64_t ta = esp_timer_get_time();
+    st_ctrl.blocked_us_total += (ta - tb);
 
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // acorda após ENC
@@ -300,7 +382,10 @@ static void task_spd_ctrl(void *arg){
 static void task_sort_act(void *arg) {
     sort_evt_t ev;
     for (;;) {
+        int64_t tb = esp_timer_get_time();
         if (xQueueReceive(qSort, &ev, portMAX_DELAY) == pdTRUE) {
+            int64_t ta = esp_timer_get_time();
+            st_sort.blocked_us_total += (ta - tb);
             stats_on_release(&st_sort, ev.t_evt_us);
             stats_on_start(&st_sort, esp_timer_get_time());
 
@@ -315,7 +400,10 @@ static void task_sort_act(void *arg) {
 /* ====== SAFETY_TASK (evento Touch D): E-stop ====== */
 static void task_safety(void *arg) {
     for (;;) {
+        int64_t tb = esp_timer_get_time();
         if (xSemaphoreTake(semEStop, portMAX_DELAY) == pdTRUE) {
+            int64_t ta = esp_timer_get_time();
+            st_safe.blocked_us_total += (ta - tb);
             stats_on_release(&st_safe, g_last_touchD_us);
             stats_on_start(&st_safe, esp_timer_get_time());
 
@@ -481,41 +569,47 @@ static void task_stats(void *arg)
 
         ESP_LOGI(TAG, "[%s] STATS: rpm=%.1f set=%.1f pos=%.1fmm", ts, g_belt.rpm, g_belt.set_rpm, g_belt.pos_mm);
 
+        now_str(ts, sizeof(ts));
         
-
+        int32_t p99 = p99_of_buf(st_enc.r_buf, st_enc.r_count);
         ESP_LOGI(TAG,
-            "[%s] ENC: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_enc.releases, st_enc.finishes, st_enc.hard_miss,
-            (long long)st_enc.worst_exec_us,
-            (long long)st_enc.worst_latency_us,
-            (long long)st_enc.worst_response_us);
-        
-        
-        
-        ESP_LOGI(TAG,
-            "[%s] CTRL: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_ctrl.releases, st_ctrl.finishes, st_ctrl.hard_miss,
-            (long long)st_ctrl.worst_exec_us,
-            (long long)st_ctrl.worst_latency_us,
-            (long long)st_ctrl.worst_response_us);
-        
-        
-        
-        ESP_LOGI(TAG,
-            "[%s] SORT: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_sort.releases, st_sort.finishes, st_sort.hard_miss,
-            (long long)st_sort.worst_exec_us,
-            (long long)st_sort.worst_latency_us,
-            (long long)st_sort.worst_response_us);
+        "[%s] ENC: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+        ts, st_enc.releases, st_enc.finishes, st_enc.hard_miss,
+        (long long)st_enc.worst_response_us, (int)p99,
+        (long long)st_enc.worst_latency_us, (long long)st_enc.worst_exec_us,
+        mk_hits(&st_enc), st_enc.k_window,
+        (long long)st_enc.blocked_us_total, st_enc.preemptions);
 
         
         
+        
         ESP_LOGI(TAG,
-            "[%s] SAFE: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_safe.releases, st_safe.finishes, st_safe.hard_miss,
-            (long long)st_safe.worst_exec_us,
-            (long long)st_safe.worst_latency_us,
-            (long long)st_safe.worst_response_us);
+            "[%s] CTRL: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+            ts,st_ctrl.releases, st_ctrl.finishes, st_ctrl.hard_miss,
+            (long long)st_ctrl.worst_response_us, (int)p99,
+            (long long)st_ctrl.worst_latency_us, (long long)st_ctrl.worst_exec_us,
+            mk_hits(&st_ctrl), st_ctrl.k_window,
+            (long long)st_ctrl.blocked_us_total, st_ctrl.preemptions);
+
+        now_str(ts, sizeof(ts));
+        
+        ESP_LOGI(TAG,
+            "[%s] SORT: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+            ts,st_sort.releases, st_sort.finishes, st_sort.hard_miss,
+            (long long)st_sort.worst_response_us, (int)p99,
+            (long long)st_sort.worst_latency_us, (long long)st_sort.worst_exec_us,
+            mk_hits(&st_sort), st_sort.k_window,
+            (long long)st_sort.blocked_us_total, st_sort.preemptions);
+
+        
+        
+        ESP_LOGI(TAG,
+            "[%s] SAFE: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+            ts,st_safe.releases, st_safe.finishes, st_safe.hard_miss,
+            (long long)st_safe.worst_response_us, (int)p99,
+            (long long)st_safe.worst_latency_us, (long long)st_safe.worst_exec_us,
+            mk_hits(&st_safe), st_safe.k_window,
+            (long long)st_safe.blocked_us_total, st_safe.preemptions);
 
         // %CPU simples via Idle Hook (se habilitado)
         #if configUSE_IDLE_HOOK
@@ -566,26 +660,80 @@ static void start_udp(void);
 
 static void udp_task(void *arg){
     udp_should_run = true;
+
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "[UDP] socket() falhou");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // destino: seu PC
     struct sockaddr_in dest = {0};
     dest.sin_family = AF_INET;
-    dest.sin_port = htons(UDP_PORT);
+    dest.sin_port   = htons(UDP_PORT);
     inet_pton(AF_INET, PC_IP, &dest.sin_addr.s_addr);
 
+    // timeout p/ não travar no recvfrom
+    struct timeval tv = {.tv_sec=0, .tv_usec=400000}; // 400 ms
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    uint32_t seq = 0;
     while (udp_should_run) {
-        char payload[64];
-        static int seq = 0;
-        snprintf(payload, sizeof(payload), "{\"seq\":%d,\"ax\":0.12,\"ay\":-0.03}", seq++);
-        sendto(sock, payload, strlen(payload), 0, (struct sockaddr*)&dest, sizeof(dest));
+        // marca de envio no ESP (epoch µs)
+        int64_t t0 = now_us_epoch();
+
+        // payload com metadados para o PC ecoar de volta
+        char tx[160];
+        int n = snprintf(tx, sizeof(tx), "{\"seq\":%u,\"proto\":\"UDP\",\"t_esp_send_us\":%lld}", (unsigned int)seq, (long long)t0);
+
+        // envia
+        int s = sendto(sock, tx, n, 0, (struct sockaddr*)&dest, sizeof(dest));
+        if (s < 0) {
+            ESP_LOGW(TAG, "[UDP] sendto falhou (seq=%u)", seq);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        // aguarda reply do PC
+        char rx[256];
+        struct sockaddr_in from; socklen_t flen = sizeof(from);
+        int r = recvfrom(sock, rx, sizeof(rx)-1, 0, (struct sockaddr*)&from, &flen);
+        int64_t t3 = now_us_epoch();
+
+        if (r > 0) {
+            rx[r] = 0;
+            long long t_pc_recv_us = 0, t_pc_send_us = 0;
+            bool ok_recv = parse_i64_from_json(rx, "t_pc_recv_us", &t_pc_recv_us);
+            bool ok_send = parse_i64_from_json(rx, "t_pc_send_us", &t_pc_send_us);
+            long long rtt_us = (long long)(t3 - t0);
+            // One-way (assume relógios SNTP alinhados):
+            //   ESP -> PC  ~ t_pc_recv_us - t0
+            //   PC  -> ESP ~ t3 - t_pc_send_us
+            long long owd_esp2pc_us = ok_recv ? (t_pc_recv_us - (long long)t0) : -1;
+            long long owd_pc2esp_us = ok_send ? ((long long)t3 - t_pc_send_us) : -1;
+            if (ok_recv && ok_send) {
+                ESP_LOGI(TAG,
+                    "[UDP] seq=%u RTT=%lldus | owd esp->pc=%lldus pc->esp=%lldus | RX=%s",
+                    seq, rtt_us, owd_esp2pc_us, owd_pc2esp_us, rx);
+            } else {
+                ESP_LOGI(TAG,
+                    "[UDP] seq=%u RTT=%lldus | (sem campos p/ owd) | RX=%s",
+                    seq, rtt_us, rx);
+            }
+        } else {
+            ESP_LOGW(TAG, "[UDP] seq=%u sem resposta (timeout)", seq);
+        }
+        seq++;
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
-    // cleanup
-    if (sock >= 0) close(sock);
+    close(sock);
     hUDP = NULL;
     udp_should_run = false;
     vTaskDelete(NULL);
 }
+
 
 //Espera pacotes enviados pelo PC usando Protocolo TCP e devolve informações
 static void stop_tcp(void);
@@ -641,14 +789,34 @@ static void tcp_server_task(void *arg) {
                 }
                 break;
             }
-            rx[len] = 0; 
-            
-            ESP_LOGW(TAG, "[%s] RX: %s", ts, rx);
+            rx[len] = 0;
+            int64_t t_esp_recv_us = now_us_epoch();
+            unsigned seq = 0;
+            long long t_pc_send_us = 0;
+            {
+                // pega "seq" e "t_pc_send_us" com os helpers
+                // primeiro, acha começo do '{' p/ o "json" leve:
+                const char *json = strchr(rx, '{');
+                if (json) {
+                    long long tmp = 0;
+                    if (parse_i64_from_json(json, "seq", &tmp)) seq = (unsigned)tmp;
+                    parse_i64_from_json(json, "t_pc_send_us", &t_pc_send_us);
+                }
+            }
 
-            // Eco + resposta JSON simples
-            char tx[300];
-            snprintf(tx, sizeof(tx), "{\"ok\":true,\"echo\":\"%s\"}\n", rx);
-            send(sock, tx, strlen(tx), 0);
+            int64_t t_esp_send_us = now_us_epoch();
+
+            // Monta resposta
+            char tx[256];
+            int tn = snprintf(tx, sizeof(tx),
+                "{\"ok\":true,\"proto\":\"TCP\",\"seq\":%u,"
+                "\"t_pc_send_us\":%lld,"
+                "\"t_esp_recv_us\":%lld,"
+                "\"t_esp_send_us\":%lld}\n",
+                seq, (long long)t_pc_send_us,
+                (long long)t_esp_recv_us, (long long)t_esp_send_us);
+
+            send(sock, tx, tn, 0);
         }
         shutdown(sock, 0);
         close(sock);
