@@ -563,13 +563,7 @@ static void task_stats(void *arg)
         ESP_LOGI(TAG, "[%s] STATS: rpm=%.1f set=%.1f pos=%.1fmm", ts, g_belt.rpm, g_belt.set_rpm, g_belt.pos_mm);
 
         now_str(ts, sizeof(ts));
-
-        //ESP_LOGI(TAG,
-         //   "[%s] ENC: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-          //  ts, st_enc.releases, st_enc.finishes, st_enc.hard_miss,
-           // (long long)st_enc.worst_exec_us,
-            //(long long)st_enc.worst_latency_us,
-            //(long long)st_enc.worst_response_us);
+        
         int32_t p99 = p99_of_buf(st_enc.r_buf, st_enc.r_count);
         ESP_LOGI(TAG,
         "[%s] ENC: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
@@ -583,29 +577,32 @@ static void task_stats(void *arg)
         now_str(ts, sizeof(ts));
         
         ESP_LOGI(TAG,
-            "[%s] CTRL: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_ctrl.releases, st_ctrl.finishes, st_ctrl.hard_miss,
-            (long long)st_ctrl.worst_exec_us,
-            (long long)st_ctrl.worst_latency_us,
-            (long long)st_ctrl.worst_response_us);
-        
-        now_str(ts, sizeof(ts));
-        
-        ESP_LOGI(TAG,
-            "[%s] SORT: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_sort.releases, st_sort.finishes, st_sort.hard_miss,
-            (long long)st_sort.worst_exec_us,
-            (long long)st_sort.worst_latency_us,
-            (long long)st_sort.worst_response_us);
+            "[%s] CTRL: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+            ts,st_ctrl.releases, st_ctrl.finishes, st_ctrl.hard_miss,
+            (long long)st_ctrl.worst_response_us, (int)p99,
+            (long long)st_ctrl.worst_latency_us, (long long)st_ctrl.worst_exec_us,
+            mk_hits(&st_ctrl), st_ctrl.k_window,
+            (long long)st_ctrl.blocked_us_total, st_ctrl.preemptions);
 
         now_str(ts, sizeof(ts));
         
         ESP_LOGI(TAG,
-            "[%s] SAFE: rel=%u fin=%u hard=%u Cmax=%lldus Lmax=%lldus Rmax=%lldus",
-            ts, st_safe.releases, st_safe.finishes, st_safe.hard_miss,
-            (long long)st_safe.worst_exec_us,
-            (long long)st_safe.worst_latency_us,
-            (long long)st_safe.worst_response_us);
+            "[%s] SORT: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+            ts,st_sort.releases, st_sort.finishes, st_sort.hard_miss,
+            (long long)st_sort.worst_response_us, (int)p99,
+            (long long)st_sort.worst_latency_us, (long long)st_sort.worst_exec_us,
+            mk_hits(&st_sort), st_sort.k_window,
+            (long long)st_sort.blocked_us_total, st_sort.preemptions);
+
+        now_str(ts, sizeof(ts));
+        
+        ESP_LOGI(TAG,
+            "[%s] SAFE: rel=%u fin=%u hard=%u WCRT=%lldus HWM99≈%dus Lmax=%lldus Cmax=%lldus (m,k)=(%u,%u) block=%lldus preempt=%u",
+            ts,st_safe.releases, st_safe.finishes, st_safe.hard_miss,
+            (long long)st_safe.worst_response_us, (int)p99,
+            (long long)st_safe.worst_latency_us, (long long)st_safe.worst_exec_us,
+            mk_hits(&st_safe), st_safe.k_window,
+            (long long)st_safe.blocked_us_total, st_safe.preemptions);
 
         // %CPU simples via Idle Hook (se habilitado)
         #if configUSE_IDLE_HOOK
